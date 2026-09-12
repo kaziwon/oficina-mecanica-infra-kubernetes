@@ -21,6 +21,9 @@ AWS; `infra/addons` usa o cluster pronto para instalar componentes via Helm.
 - New Relic Kubernetes integration
 - GitHub Actions
 
+Nao existe Dockerfile neste repositorio porque ele provisiona infraestrutura e
+add-ons. A imagem da API e criada pelo repositorio da aplicacao principal.
+
 ## Arquitetura deste repositorio
 
 ```mermaid
@@ -52,6 +55,35 @@ Secrets necessarios no GitHub:
 - `AWS_SESSION_TOKEN`
 - `NEW_RELIC_LICENSE_KEY`
 
+## Validar localmente sem criar recursos
+
+Na raiz do repositorio, execute:
+
+```bash
+terraform fmt -check -recursive
+terraform -chdir=infra/cluster init -backend=false
+terraform -chdir=infra/cluster validate
+terraform -chdir=infra/addons init -backend=false
+terraform -chdir=infra/addons validate
+```
+
+Os comandos apenas baixam os providers e validam as duas raizes Terraform. Nao
+executam `plan` ou `apply` e nao consomem recursos do AWS Academy.
+
+## Implantar em producao
+
+1. Conclua primeiro a entrega do repositorio de banco.
+2. Atualize os secrets AWS e `NEW_RELIC_LICENSE_KEY` neste repositorio.
+3. Confirme que as alteracoes foram integradas na branch `main`.
+4. Abra `Actions -> Entrega continua AWS - Kubernetes`.
+5. Clique em `Run workflow`, selecione `main` e confirme.
+6. Aguarde o Summary exibir cluster, ECR, endpoint do Kong e nome do cluster no
+   New Relic.
+
+O workflow cria primeiro EKS, node group, ECR e Metrics Server. Depois configura
+`kubectl` e instala Kong e New Relic pela segunda raiz Terraform. Nenhum cadastro
+manual e feito no Kong.
+
 ## Ordem de deploy
 
 1. Banco
@@ -62,8 +94,15 @@ Secrets necessarios no GitHub:
 A destruicao ocorre na ordem inversa. A pipeline deste repositorio bloqueia a
 remocao enquanto os states da aplicacao ou da Lambda ainda possuem recursos.
 
+Para remover, execute `Actions -> Destruir infraestrutura AWS - Kubernetes` na
+branch `main` e informe `DESTRUIR`, somente depois de destruir Lambda e
+aplicacao.
+
 ## Swagger
 
 Este repositorio nao expoe uma API propria. O Swagger da aplicacao principal e
 publicado pelo Kong, e a URL final aparece no resumo da pipeline da aplicacao:
 [repositorio principal](https://github.com/kaziwon/techchallengerm372882).
+
+Diagramas completos, RFCs e ADRs estao no
+[`docs/README.md` da aplicacao principal](https://github.com/kaziwon/techchallengerm372882/blob/main/docs/README.md).

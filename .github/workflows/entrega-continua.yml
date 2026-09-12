@@ -1,0 +1,130 @@
+name: Entrega continua AWS - Kubernetes
+
+env:
+  AWS_REGION: us-east-1
+  PROJECT_NAME: oficina-mecanica
+  TERRAFORM_VERSION: 1.15.8
+  TF_IN_AUTOMATION: true
+
+on:
+  workflow_dispatch:
+
+concurrency:
+  group: oficina-mecanica-kubernetes-deploy
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    name: Provisionar EKS e add-ons
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: read
+
+    steps:
+      - name: Validate production branch
+        run: >-
+          test "$GITHUB_REF_NAME" = "main" ||
+          { echo "::error::O deploy deve ser executado a partir da branch main."; exit 1; }
+
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: ./.github/actions/configure-aws-credentials
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-session-token: ${{ secrets.AWS_SESSION_TOKEN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TERRAFORM_VERSION }}
+          terraform_wrapper: false
+
+      - name: Locate shared state and validate database
+        id: state
+        run: |
+          account_id="$(aws sts get-caller-identity --query Account --output text)"
+          state_bucket="${PROJECT_NAME}-terraform-state-${account_id}"
+
+          aws s3api head-bucket --bucket "$state_bucket" >/dev/null || {
+            echo "::error::Execute primeiro a entrega do repositorio de banco."
+            exit 1
+          }
+
+          aws s3api head-object \
+            --bucket "$state_bucket" \
+            --key oficina-mecanica/database/terraform.tfstate >/dev/null || {
+            echo "::error::O state do banco nao foi encontrado."
+            exit 1
+          }
+
+          echo "state_bucket=${state_bucket}" >> "$GITHUB_OUTPUT"
+
+      - name: Terraform init - cluster
+        run: >-
+          terraform -chdir=infra/cluster init
+          -input=false
+          -backend-config="bucket=${{ steps.state.outputs.state_bucket }}"
+
+      - name: Terraform plan - cluster
+        env:
+          TF_VAR_state_bucket_name: ${{ steps.state.outputs.state_bucket }}
+        run: terraform -chdir=infra/cluster plan -input=false -no-color -out=cluster.tfplan
+
+      - name: Terraform apply - cluster
+        run: terraform -chdir=infra/cluster apply -input=false cluster.tfplan
+
+      - name: Configure kubectl
+        run: |
+          cluster_name="$(terraform -chdir=infra/cluster output -raw eks_cluster_name)"
+          aws eks update-kubeconfig --region "$AWS_REGION" --name "$cluster_name"
+          kubectl wait --for=condition=Ready nodes --all --timeout=600s
+          kubectl rollout status deployment/metrics-server -n kube-system --timeout=300s
+
+      - name: Terraform init - add-ons
+        run: >-
+          terraform -chdir=infra/addons init
+          -input=false
+          -backend-config="bucket=${{ steps.state.outputs.state_bucket }}"
+
+      - name: Terraform plan - add-ons
+        env:
+          TF_VAR_state_bucket_name: ${{ steps.state.outputs.state_bucket }}
+          TF_VAR_new_relic_license_key: ${{ secrets.NEW_RELIC_LICENSE_KEY }}
+        run: terraform -chdir=infra/addons plan -input=false -no-color -out=addons.tfplan
+
+      - name: Terraform apply - add-ons
+        env:
+          TF_VAR_state_bucket_name: ${{ steps.state.outputs.state_bucket }}
+          TF_VAR_new_relic_license_key: ${{ secrets.NEW_RELIC_LICENSE_KEY }}
+        run: terraform -chdir=infra/addons apply -input=false addons.tfplan
+
+      - name: Validate cluster add-ons
+        run: |
+          kubectl get nodes
+          kubectl get pods -n kong
+          kubectl get pods -n newrelic
+          kubectl wait \
+            --for=jsonpath='{.status.loadBalancer.ingress[0].hostname}' \
+            service/kong-gateway-proxy \
+            -n kong \
+            --timeout=600s
+
+      - name: Refresh add-on outputs
+        env:
+          TF_VAR_state_bucket_name: ${{ steps.state.outputs.state_bucket }}
+          TF_VAR_new_relic_license_key: ${{ secrets.NEW_RELIC_LICENSE_KEY }}
+        run: terraform -chdir=infra/addons apply -refresh-only -auto-approve -input=false
+
+      - name: Publish deployment summary
+        run: |
+          gateway_hostname="$(kubectl get service kong-gateway-proxy -n kong -o jsonpath='{.status.loadBalancer.ingress[0].hostname}')"
+          echo "### Infraestrutura Kubernetes implantada" >> "$GITHUB_STEP_SUMMARY"
+          echo "Cluster: $(terraform -chdir=infra/cluster output -raw eks_cluster_name)" >> "$GITHUB_STEP_SUMMARY"
+          echo "ECR: $(terraform -chdir=infra/cluster output -raw ecr_repository_url)" >> "$GITHUB_STEP_SUMMARY"
+          echo "Kong Gateway: http://${gateway_hostname}" >> "$GITHUB_STEP_SUMMARY"
+          echo "New Relic Kubernetes: $(terraform -chdir=infra/addons output -raw new_relic_cluster_name)" >> "$GITHUB_STEP_SUMMARY"

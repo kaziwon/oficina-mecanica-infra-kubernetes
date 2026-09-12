@@ -1,0 +1,65 @@
+name: Integracao continua - Kubernetes
+
+env:
+  TERRAFORM_VERSION: 1.15.8
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+jobs:
+  terraform-format:
+    name: Terraform format
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TERRAFORM_VERSION }}
+
+      - name: Check Terraform formatting
+        run: terraform fmt -check -recursive
+
+  terraform-cluster:
+    name: Validate EKS Terraform
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TERRAFORM_VERSION }}
+
+      - name: Terraform init
+        run: terraform -chdir=infra/cluster init -backend=false -input=false
+
+      - name: Terraform validate
+        run: terraform -chdir=infra/cluster validate -no-color
+
+  terraform-addons:
+    name: Validate add-ons Terraform
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TERRAFORM_VERSION }}
+
+      - name: Terraform init
+        run: terraform -chdir=infra/addons init -backend=false -input=false
+
+      - name: Terraform validate
+        run: terraform -chdir=infra/addons validate -no-color
